@@ -102,6 +102,12 @@
   .row label { white-space: nowrap; }
   .row output { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
   input[type=range] { width: 100%; accent-color: var(--ink); margin: 0; }
+  .seg { grid-column: 2 / 4; display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--ink); }
+  .seg label { position: relative; cursor: pointer; }
+  .seg input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+  .seg span { display: block; text-align: center; padding: 5px 4px; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; }
+  .seg input:checked + span { background: var(--ink); color: var(--paper); }
+  .seg input:focus-visible + span { outline: 2px solid var(--signal); outline-offset: 1px; }
   .checks { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; }
   .checks label { display: flex; align-items: center; gap: 7px; cursor: pointer; }
   input[type=checkbox] { accent-color: var(--ink); margin: 0; }
@@ -126,7 +132,7 @@
     <div class="status"><span id="segDot" class="dot"></span><span id="segText">Body tracking: loading</span></div>
     <div class="keys">
       <ul>
-        <li><kbd>H</kbd> panel</li><li><kbd>R</kbd> restart</li><li><kbd>Space</kbd> pause</li><li><kbd>F</kbd> fullscreen</li><li><kbd>S</kbd> save PNG</li>
+        <li><kbd>H</kbd> panel</li><li><kbd>R</kbd> restart</li><li><kbd>M</kbd> grow / fixed loop</li><li><kbd>Space</kbd> pause</li><li><kbd>F</kbd> fullscreen</li><li><kbd>S</kbd> save PNG</li>
       </ul>
       Click the drawing to restart the line from that spot.
     </div>
@@ -146,6 +152,13 @@
   </fieldset>
   <fieldset>
     <legend>Motion</legend>
+    <div class="row">
+      <span class="lab" id="modeLab">Mode</span>
+      <div class="seg" role="radiogroup" aria-labelledby="modeLab">
+        <label><input type="radio" name="mode" id="modeGrow" value="grow" checked><span>Grow</span></label>
+        <label><input type="radio" name="mode" id="modeFixed" value="fixed"><span>Fixed loop</span></label>
+      </div>
+    </div>
     <div class="row"><label for="speed">Speed</label><input id="speed" type="range" min="1" max="6" step="1" value="2"><output id="speedOut"></output></div>
     <div class="row"><label for="smooth">Smoothness</label><input id="smooth" type="range" min="0.05" max="1" step="0.01" value="0.6"><output id="smoothOut"></output></div>
   </fieldset>
@@ -182,6 +195,11 @@
    - edges with room around them split now and then, so the line grows and buckles
    - crowded points are dropped, so the line can shrink where it is too dense
    - points outside the body mask are pushed back in
+
+  Fixed loop mode keeps the same push-apart, smoothing and body rules, but the line
+  has a set number of points from the first frame and never adds or drops one.
+  Points slide along the line to stay evenly spaced, and springs that want the line
+  longer make it stretch and fold until it fills the body.
 -->
 <script id="sim-src">
 function createSim() {
@@ -199,6 +217,12 @@ function createSim() {
     prune: 0.03,    // ...and is dropped with this chance per step
     mask: 0.35,     // push back inside the body
     shed: 0.15,     // chance per step that a point well outside the body is dropped
+    fixedGrow: 1.0, // fixed loop: springs want the line this much longer than it is right now...
+    fixedSpring: 0.5, // ...with this strength
+    fixedRoom: false, // ...only where there's room (true) or everywhere that isn't crowded (false)
+    fixedCrowd: 8,  // ...a point with more neighbours than this is crowded...
+    fixedEase: 0.7, // ...and its springs pull the line in to this fraction of its length
+    fixedJitter: 0.03, // fixed loop: size of the slow wobble that starts the folds
     maxStep: 0.22,  // max move per step
     jitter: 0.02,
   };
@@ -213,7 +237,7 @@ function createSim() {
   let cellStart = new Int32Array(1), cursor = new Int32Array(1);
   let cellSize = 4, gCols = 1, gRows = 1;
   let n = 0, W = 1, H = 1, sMin = 4, sMax = 16, maskOn = false, lost = 0;
-  const P = { detail: 24000, dark: 3.5, light: 18, contrast: 1.1, smooth: 0.6 };
+  const P = { detail: 24000, dark: 3.5, light: 18, contrast: 1.1, smooth: 0.6, mode: "grow" };
   let F = null; // field: { FW, FH, lum, lumMin, mask, maskOn, bodyX, bodyY, headX, headY }
 
   function scales() {
@@ -287,6 +311,7 @@ function createSim() {
     // most of the line stranded outside the body for a while (you walked off and came back): start over
     lost = maskOn && outside > n * 0.7 ? lost + 1 : 0;
     if (lost > 150) { lost = 0; seed(F.headX * W, F.headY * H); return; }
+    if (P.mode === "fixed") { stepFixed(); return; }
     buildGrid();
     const kAlign = P.smooth, inv = 1 / cellSize;
     const kRep = T.rep, kSpring = T.spring, edge = T.edge, kMask = T.mask, maxStep = T.maxStep, jitter = T.jitter;
@@ -393,11 +418,174 @@ function createSim() {
     n = m;
   }
 
+  // ---- fixed loop: a set number of points from the start, nothing added or removed ----
+  // Points slide along the line to stay evenly spaced (in units of local spacing), and springs
+  // that want the line a bit longer than it is make it stretch and fold, up to its natural length.
+  const CUM = new Float64Array(CAP + 1);
+  const JX = new Float32Array(CAP), JY = new Float32Array(CAP); // slow random wobble, one per pushing point
+  const fixedStats = { c: 0, k: 0, room: 0, crowded: 0 };
+  const AX = new Float32Array(CAP), AY = new Float32Array(CAP);
+
+  function buildSourceGrid(k) {
+    // like buildGrid, but only every k-th point pushes
+    cellSize = Math.max(sMin, sMax / 3);
+    gCols = Math.ceil(W / cellSize) + 1; gRows = Math.ceil(H / cellSize) + 1;
+    const nc = gCols * gRows;
+    if (cellStart.length < nc + 1) { cellStart = new Int32Array(nc + 1); cursor = new Int32Array(nc + 1); }
+    cellStart.fill(0, 0, nc + 1);
+    const inv = 1 / cellSize;
+    let m = 0;
+    for (let i = 0; i < n; i += k, m++) {
+      let cx = (X[i] * inv) | 0, cy = (Y[i] * inv) | 0;
+      if (cx < 0) cx = 0; else if (cx >= gCols) cx = gCols - 1;
+      if (cy < 0) cy = 0; else if (cy >= gRows) cy = gRows - 1;
+      const c = cy * gCols + cx;
+      cellOf[m] = c; cellStart[c + 1]++;
+    }
+    for (let c = 0; c < nc; c++) cellStart[c + 1] += cellStart[c];
+    cursor.set(cellStart.subarray(0, nc));
+    for (let s = 0, i = 0; s < m; s++, i += k) { const p = cursor[cellOf[s]]++; SI[p] = i; SX[p] = X[i]; SY[p] = Y[i]; SS[p] = SP[i]; }
+    return m;
+  }
+
+  function stepFixed() {
+    // line length measured in local spacings, per point
+    let U = 0;
+    for (let i = 0; i < n; i++) {
+      const j = i === n - 1 ? 0 : i + 1, ex = X[j] - X[i], ey = Y[j] - Y[i];
+      U += Math.sqrt(ex * ex + ey * ey) * 2 / (SP[i] + SP[j]);
+    }
+    const c = U / n;
+    // only every k-th point pushes, so pushing points sit about a third of a spacing apart
+    const k = Math.max(1, Math.min(Math.floor(0.35 / Math.max(c, 1e-6)), Math.floor(n / 12)));
+    const m = buildSourceGrid(k);
+    for (let s = 0; s < m; s++) {
+      JX[s] = JX[s] * 0.9 + (Math.random() - 0.5) * 0.2;
+      JY[s] = JY[s] * 0.9 + (Math.random() - 0.5) * 0.2;
+    }
+    const inv = 1 / cellSize, kAlign = P.smooth;
+    const kRep = T.rep * Math.min(2, k * c / 0.45); // each pushing point stands in for k points
+    const kSpring = T.fixedSpring, edge = T.edge, kMask = T.mask, maxStep = T.maxStep, jitter = T.fixedJitter;
+    const cntScale = k * c / 0.45; // neighbour counts in the same units as grow mode
+    let roomSum = 0, crowded = 0;
+    // average position of the points within one stride along the line, for smoothing
+    {
+      let ax = 0, ay = 0;
+      for (let j = -k; j <= k; j++) { const q = ((j % n) + n) % n; ax += X[q]; ay += Y[q]; }
+      const invW = 1 / (2 * k + 1);
+      for (let i = 0; i < n; i++) {
+        AX[i] = ax * invW; AY[i] = ay * invW;
+        const qa = (i + k + 1) % n, qr = ((i - k) % n + n) % n;
+        ax += X[qa] - X[qr]; ay += Y[qa] - Y[qr];
+      }
+    }
+    const kMean = Math.min(0.9, kAlign * 1.5);
+    for (let i = 0; i < n; i++) {
+      const x = X[i], y = Y[i], R = SP[i], R2 = R * R;
+      let rx = 0, ry = 0, cnt = 0;
+      const kk = Math.ceil(R * inv), cx = (x * inv) | 0, cy = (y * inv) | 0;
+      const y0 = Math.max(0, cy - kk), y1 = Math.min(gRows - 1, cy + kk);
+      const x0 = Math.max(0, cx - kk), x1 = Math.min(gCols - 1, cx + kk);
+      for (let gy = y0; gy <= y1; gy++) {
+        const base = gy * gCols;
+        for (let gx = x0; gx <= x1; gx++) {
+          const cc = base + gx;
+          for (let t = cellStart[cc], e = cellStart[cc + 1]; t < e; t++) {
+            const dx = x - SX[t], dy = y - SY[t], d2 = dx * dx + dy * dy;
+            if (d2 >= R2 || d2 < 1e-12) continue;
+            const Rj = SS[t], Rij = Rj < R ? Rj : R;
+            if (d2 >= Rij * Rij) continue;
+            // skip its own stretch of line, fading in by distance along the line (in spacings) so
+            // neighbouring points never get opposite kicks, which would crumple the line
+            let di = i - SI[t]; if (di < 0) di = -di; if (di > n - di) di = n - di;
+            const arc = di * c;
+            if (arc < 0.9) continue;
+            const d = Math.sqrt(d2), f = (Rij - d) / d * (arc < 1.3 ? (arc - 0.9) * 2.5 : 1);
+            rx += dx * f; ry += dy * f; cnt++;
+          }
+        }
+      }
+      // springs to the points one stride away: stretch where there's room, ease off where it's crowded,
+      // never past the line's natural length
+      const room = cnt * cntScale;
+      roomSum += room; if (room > T.fixedCrowd) crowded++;
+      const grow = room > T.fixedCrowd ? T.fixedEase : T.fixedRoom && room >= T.roomMax ? 1 : 1 + T.fixedGrow;
+      const a = i - k < 0 ? i - k + n : i - k, b = i + k >= n ? i + k - n : i + k;
+      let sx = 0, sy = 0;
+      {
+        let ex = x - X[a], ey = y - Y[a], L = Math.sqrt(ex * ex + ey * ey) || 1e-6;
+        let f = (Math.min(L * grow, k * edge * R) - L) / L; sx += ex * f; sy += ey * f;
+        ex = x - X[b]; ey = y - Y[b]; L = Math.sqrt(ex * ex + ey * ey) || 1e-6;
+        f = (Math.min(L * grow, k * edge * R) - L) / L; sx += ex * f; sy += ey * f;
+      }
+      // smoothing: toward the average of the points within a stride (shape) and of the next neighbours
+      const ip = i === 0 ? n - 1 : i - 1, inx = i === n - 1 ? 0 : i + 1;
+      let dx = rx * kRep + sx * kSpring + (AX[i] - x) * kMean + ((X[ip] + X[inx]) * 0.5 - x) * 0.5;
+      let dy = ry * kRep + sy * kSpring + (AY[i] - y) * kMean + ((Y[ip] + Y[inx]) * 0.5 - y) * 0.5;
+      if (maskOn && MK[i] < 0.5) {
+        const w = (0.5 - MK[i]) * 2 + 0.25;
+        dx += GX[i] * R * kMask * w; dy += GY[i] * R * kMask * w;
+      }
+      // wobble that is smooth along the line, so the loop folds instead of fraying
+      const s0 = (i / k) | 0, tt = (i - s0 * k) / k, s1 = s0 + 1 >= m ? 0 : s0 + 1;
+      dx += (JX[s0] * (1 - tt) + JX[s1] * tt) * R * jitter;
+      dy += (JY[s0] * (1 - tt) + JY[s1] * tt) * R * jitter;
+      const lim = (maskOn && MK[i] < 0.5 ? R * 0.5 : SPM[i] * maxStep), m2 = dx * dx + dy * dy;
+      if (m2 > lim * lim) { const s = lim / Math.sqrt(m2); dx *= s; dy *= s; }
+      DX[i] = dx; DY[i] = dy;
+    }
+    // Average each move with its neighbours over one stride, so the line moves like a smooth rope.
+    // Points sit far closer together than any force changes, and without this, rules that switch
+    // between neighbouring points (crowded or not, inside the body or not) crumple it.
+    if (k > 1) {
+      const h = k >> 1, inv2 = 1 / (2 * h + 1);
+      let ax = 0, ay = 0;
+      for (let j = -h; j <= h; j++) { const q = (j + n) % n; ax += DX[q]; ay += DY[q]; }
+      for (let i = 0; i < n; i++) {
+        FXs[i] = ax * inv2; FYs[i] = ay * inv2;
+        const qa = (i + h + 1) % n, qr = (i - h + n) % n;
+        ax += DX[qa] - DX[qr]; ay += DY[qa] - DY[qr];
+      }
+      DX.set(FXs.subarray(0, n)); DY.set(FYs.subarray(0, n));
+    }
+    for (let i = 0; i < n; i++) {
+      let x = X[i] + DX[i], y = Y[i] + DY[i];
+      if (x < 1) x = 1; else if (x > W - 1) x = W - 1;
+      if (y < 1) y = 1; else if (y > H - 1) y = H - 1;
+      X[i] = x; Y[i] = y;
+    }
+    fixedStats.c = c; fixedStats.k = k; fixedStats.room = roomSum / n; fixedStats.crowded = crowded / n;
+    resampleFixed(Math.min(CAP - 2, P.detail));
+  }
+
+  // spread exactly N points along the line, evenly in units of local spacing
+  function resampleFixed(N) {
+    CUM[0] = 0;
+    for (let i = 0; i < n; i++) {
+      const j = i === n - 1 ? 0 : i + 1, ex = X[j] - X[i], ey = Y[j] - Y[i];
+      CUM[i + 1] = CUM[i] + Math.sqrt(ex * ex + ey * ey) * 2 / (SP[i] + SP[j]);
+    }
+    const U = CUM[n];
+    if (!(U > 0)) return;
+    const du = U / N;
+    let seg = 0;
+    for (let q = 0; q < N; q++) {
+      const u = q * du;
+      while (seg < n - 1 && CUM[seg + 1] < u) seg++;
+      const span = CUM[seg + 1] - CUM[seg], t = span > 0 ? (u - CUM[seg]) / span : 0;
+      const a = seg, b = seg === n - 1 ? 0 : seg + 1;
+      X2[q] = X[a] + (X[b] - X[a]) * t; Y2[q] = Y[a] + (Y[b] - Y[a]) * t; S2[q] = SP[a] + (SP[b] - SP[a]) * t;
+    }
+    let t = X; X = X2; X2 = t; t = Y; Y = Y2; Y2 = t; t = SP; SP = S2; S2 = t;
+    n = N;
+  }
+
   function seed(x, y) {
     scales();
     // size the starting ring to the spacing under it, so it doesn't merge away in light areas
     const s = F ? sMin + (sMax - sMin) * Math.pow(sample(F.lum, x, y), P.contrast) : sMin;
-    const count = 16, r = s * 1.5;
+    // a fixed loop starts with every point it will ever have, squeezed into the same small ring
+    const count = P.mode === "fixed" ? Math.min(CAP - 2, P.detail) : 16, r = s * 1.5;
     n = 0;
     for (let k = 0; k < count; k++) {
       const a = (k / count) * Math.PI * 2;
@@ -426,6 +614,7 @@ function createSim() {
     setField(f) { F = f; },
     ready() { return !!F && n > 2; },
     get n() { return n; },
+    fixedStats,
     dump() { return { W, H, sMin, sMax, cell: cellSize, X: X.slice(0, n), Y: Y.slice(0, n), SP: SP.slice(0, n) }; },
   };
 }
@@ -459,6 +648,14 @@ for (const id of Object.keys(fmt)) {
   el.addEventListener("input", () => { sync(); sendParams(); });
   sync();
 }
+ui.mode = "grow";
+function setMode(mode) {
+  ui.mode = mode;
+  $(mode === "fixed" ? "modeFixed" : "modeGrow").checked = true;
+  sendParams();
+  if (running) restart(); // each mode starts from its own kind of seed
+}
+for (const id of ["modeGrow", "modeFixed"]) $(id).addEventListener("change", (e) => { if (e.target.checked) setMode(e.target.value); });
 for (const id of ["follow", "mirror", "invert", "showCam"]) {
   const el = $(id);
   const sync = () => { ui[id] = el.checked; if (id === "invert") document.documentElement.toggleAttribute("data-invert", el.checked); };
@@ -526,7 +723,7 @@ function toSim(msg, transfer) {
   else if (msg.type === "tune") Object.assign(local.T, msg.tune);
 }
 function sendParams() {
-  toSim({ type: "params", params: { detail: ui.detail, dark: ui.dark, light: ui.light, contrast: ui.contrast, smooth: ui.smooth, speed: ui.speed } });
+  toSim({ type: "params", params: { detail: ui.detail, dark: ui.dark, light: ui.light, contrast: ui.contrast, smooth: ui.smooth, speed: ui.speed, mode: ui.mode } });
 }
 function sendSize() { toSim({ type: "size", W, H }); }
 function seed(x, y) { toSim({ type: "seed", x, y }); }
@@ -857,6 +1054,7 @@ window.addEventListener("keydown", (e) => {
   const k = e.key.toLowerCase();
   if (k === "h") $("panel").hidden = !$("panel").hidden;
   else if (k === "r") restart();
+  else if (k === "m") setMode(ui.mode === "fixed" ? "grow" : "fixed");
   else if (k === " ") { e.preventDefault(); togglePause(); }
   else if (k === "f") toggleFull();
   else if (k === "s") savePng();
