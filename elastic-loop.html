@@ -1,0 +1,884 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Elastic Loop</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  /* Layout: full-bleed drawing surface, one floating control sheet, one start card. Paper and ink only. */
+  :root {
+    --paper: #fbfbf9;
+    --ink: #17181b;
+    --muted: #6d6f74;
+    --rule: rgba(23, 24, 27, 0.16);
+    --sheet: rgba(251, 251, 249, 0.9);
+    --signal: #c8442b;
+    --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color-scheme: light;
+  }
+  :root[data-invert] {
+    --paper: #101113;
+    --ink: #eeeee9;
+    --muted: #9a9ca1;
+    --rule: rgba(238, 238, 233, 0.18);
+    --sheet: rgba(16, 17, 19, 0.88);
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font: 12px/1.45 var(--mono);
+    overflow: hidden;
+  }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: crosshair; }
+  video { display: none; }
+
+  /* start card */
+  #start {
+    position: fixed; inset: 0; display: grid; place-items: center;
+    padding: 24px max(16px, env(safe-area-inset-right, 0px)) 24px max(16px, env(safe-area-inset-left, 0px));
+  }
+  .card {
+    width: min(440px, 100%);
+    background: var(--sheet);
+    border: 1px solid var(--rule);
+    padding: 28px 28px 22px;
+    display: grid; gap: 18px;
+    backdrop-filter: blur(6px);
+  }
+  .card h1 { margin: 0; font-size: 28px; font-weight: 500; letter-spacing: -0.02em; text-wrap: balance; }
+  .card p { margin: 0; color: var(--muted); max-width: 52ch; }
+  .actions { display: flex; flex-wrap: wrap; gap: 10px; }
+  .keys { color: var(--muted); font-size: 11px; border-top: 1px solid var(--rule); padding-top: 14px; }
+  .keys kbd { font: inherit; border: 1px solid var(--rule); padding: 0 5px; color: var(--ink); }
+  .keys ul { list-style: none; margin: 0 0 6px; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 12px; }
+  .keys li { white-space: nowrap; }
+
+  button, .filebtn {
+    font: 500 12px/1 var(--mono);
+    letter-spacing: 0.04em; text-transform: uppercase;
+    color: var(--ink); background: transparent;
+    border: 1px solid var(--ink);
+    padding: 10px 14px; cursor: pointer;
+  }
+  button.primary { background: var(--ink); color: var(--paper); }
+  button:hover, .filebtn:hover { background: var(--ink); color: var(--paper); }
+  button:focus-visible, .filebtn:focus-within, input:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+  .filebtn { display: inline-flex; align-items: center; position: relative; }
+  .filebtn input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+  .status { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.live { background: var(--signal); }
+  .dot.ok { background: var(--ink); }
+
+  /* control sheet */
+  #panel {
+    position: fixed;
+    top: max(14px, env(safe-area-inset-top, 0px));
+    right: max(14px, env(safe-area-inset-right, 0px));
+    width: min(290px, calc(100vw - 28px));
+    max-height: calc(100% - 28px);
+    overflow-y: auto;
+    background: var(--sheet);
+    border: 1px solid var(--rule);
+    backdrop-filter: blur(6px);
+    display: grid;
+  }
+  #panel header {
+    display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 2px 12px;
+    padding: 12px 14px 10px; border-bottom: 1px solid var(--rule);
+  }
+  #panel header strong { font-weight: 500; font-size: 13px; white-space: nowrap; }
+  #stats { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  fieldset { border: 0; margin: 0; padding: 10px 14px 12px; display: grid; gap: 9px; border-bottom: 1px solid var(--rule); }
+  legend { float: left; width: 100%; padding: 0; margin-bottom: 2px; font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
+  .row { display: grid; grid-template-columns: 96px 1fr 44px; align-items: center; gap: 8px; }
+  .row label { white-space: nowrap; }
+  .row output { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+  input[type=range] { width: 100%; accent-color: var(--ink); margin: 0; }
+  .checks { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; }
+  .checks label { display: flex; align-items: center; gap: 7px; cursor: pointer; }
+  input[type=checkbox] { accent-color: var(--ink); margin: 0; }
+  .buttons { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; padding: 12px 14px; }
+  .buttons button { padding: 8px 6px; font-size: 11px; }
+  .hint { padding: 0 14px 12px; }
+  @media (prefers-reduced-motion: reduce) { .card, #panel { backdrop-filter: none; } }
+</style>
+</head>
+<body>
+<canvas id="stage" aria-label="Live line drawing"></canvas>
+<video id="cam" playsinline muted></video>
+
+<div id="start">
+  <div class="card">
+    <h1>Elastic Loop</h1>
+    <p>One line grows from a dot and fills your outline. Dark areas pack it in tight, light areas let it spread out. The spacing is what draws your face.</p>
+    <div class="actions">
+      <button id="btnCam" class="primary" type="button">Start camera</button>
+      <label class="filebtn">Use a video file<input id="fileIn" type="file" accept="video/*"></label>
+    </div>
+    <div class="status"><span id="segDot" class="dot"></span><span id="segText">Body tracking: loading</span></div>
+    <div class="keys">
+      <ul>
+        <li><kbd>H</kbd> panel</li><li><kbd>R</kbd> restart</li><li><kbd>Space</kbd> pause</li><li><kbd>F</kbd> fullscreen</li><li><kbd>S</kbd> save PNG</li>
+      </ul>
+      Click the drawing to restart the line from that spot.
+    </div>
+  </div>
+</div>
+
+<aside id="panel" hidden>
+  <header><strong>Elastic Loop</strong><span id="stats">0 pts</span></header>
+  <fieldset>
+    <legend>Line</legend>
+    <div class="row"><label for="detail">Detail</label><input id="detail" type="range" min="2000" max="50000" step="500" value="24000"><output id="detailOut"></output></div>
+    <div class="row"><label for="dark">Dark spacing</label><input id="dark" type="range" min="2" max="14" step="0.5" value="3.5"><output id="darkOut"></output></div>
+    <div class="row"><label for="light">Light spacing</label><input id="light" type="range" min="6" max="40" step="1" value="18"><output id="lightOut"></output></div>
+    <div class="row"><label for="contrast">Contrast</label><input id="contrast" type="range" min="0.4" max="2.5" step="0.05" value="1.1"><output id="contrastOut"></output></div>
+    <div class="row"><label for="local">Face detail</label><input id="local" type="range" min="0" max="4" step="0.1" value="1.5"><output id="localOut"></output></div>
+    <div class="row"><label for="weight">Line weight</label><input id="weight" type="range" min="0.5" max="4" step="0.1" value="1.5"><output id="weightOut"></output></div>
+  </fieldset>
+  <fieldset>
+    <legend>Motion</legend>
+    <div class="row"><label for="speed">Speed</label><input id="speed" type="range" min="1" max="6" step="1" value="2"><output id="speedOut"></output></div>
+    <div class="row"><label for="smooth">Smoothness</label><input id="smooth" type="range" min="0.05" max="1" step="0.01" value="0.6"><output id="smoothOut"></output></div>
+  </fieldset>
+  <fieldset>
+    <legend>View</legend>
+    <div class="checks">
+      <label><input id="follow" type="checkbox" checked>Follow body</label>
+      <label><input id="mirror" type="checkbox" checked>Mirror</label>
+      <label><input id="invert" type="checkbox">Invert</label>
+      <label><input id="showCam" type="checkbox">Show camera</label>
+    </div>
+  </fieldset>
+  <div class="buttons">
+    <button id="bRestart" type="button">Restart</button>
+    <button id="bPause" type="button">Pause</button>
+    <button id="bFull" type="button">Full</button>
+    <button id="bPng" type="button">PNG</button>
+    <button id="bSvg" type="button">SVG</button>
+    <button id="bHide" type="button">Hide</button>
+  </div>
+  <div class="status hint"><span id="segDot2" class="dot"></span><span id="segText2">Body tracking: loading</span></div>
+</aside>
+
+<!--
+  The simulation. It runs in a Web Worker (built from this script's text) so the
+  camera, body tracking and drawing stay smooth. If workers are blocked it runs
+  on the page instead.
+
+  Differential growth of one closed curve:
+   - every point is pushed away from other points closer than its own spacing
+     (the spacing comes from the brightness under it: dark = tight, light = loose)
+   - neighbours along the line are joined by a spring
+   - every point is pulled toward the middle of its two neighbours (smoothing)
+   - edges with room around them split now and then, so the line grows and buckles
+   - crowded points are dropped, so the line can shrink where it is too dense
+   - points outside the body mask are pushed back in
+-->
+<script id="sim-src">
+function createSim() {
+  // tuning constants (lengths are fractions of the local spacing)
+  const T = {
+    rep: 0.09,      // repulsion step
+    spring: 0.25,   // pull/push between neighbours along the line
+    edge: 0.75,     // rest length between neighbours
+    split: 1.05,    // split an edge longer than this
+    merge: 0.15,    // drop a point when its edge is shorter than this
+    grow: 0.25,     // chance per step that an edge with room around it splits
+    growMin: 0.35,  // only edges longer than this can grow
+    roomMax: 6,     // "room around it" = fewer than this many other points inside the spacing
+    crowdMin: 12,   // a point with more neighbours than this is crowded...
+    prune: 0.03,    // ...and is dropped with this chance per step
+    mask: 0.35,     // push back inside the body
+    shed: 0.15,     // chance per step that a point well outside the body is dropped
+    maxStep: 0.22,  // max move per step
+    jitter: 0.02,
+  };
+  const CAP = 60000, MIN_POINTS = 12;
+  let X = new Float32Array(CAP), Y = new Float32Array(CAP), SP = new Float32Array(CAP);
+  let X2 = new Float32Array(CAP), Y2 = new Float32Array(CAP), S2 = new Float32Array(CAP);
+  const DX = new Float32Array(CAP), DY = new Float32Array(CAP), SPM = new Float32Array(CAP);
+  const MK = new Float32Array(CAP), GX = new Float32Array(CAP), GY = new Float32Array(CAP);
+  const CNT = new Uint16Array(CAP);
+  const FXs = new Float32Array(CAP), FYs = new Float32Array(CAP), CNs = new Uint16Array(CAP); // repulsion, in cell order
+  const cellOf = new Int32Array(CAP), SI = new Int32Array(CAP), SX = new Float32Array(CAP), SY = new Float32Array(CAP), SS = new Float32Array(CAP);
+  let cellStart = new Int32Array(1), cursor = new Int32Array(1);
+  let cellSize = 4, gCols = 1, gRows = 1;
+  let n = 0, W = 1, H = 1, sMin = 4, sMax = 16, maskOn = false, lost = 0;
+  const P = { detail: 24000, dark: 3.5, light: 18, contrast: 1.1, smooth: 0.6 };
+  let F = null; // field: { FW, FH, lum, lumMin, mask, maskOn, bodyX, bodyY, headX, headY }
+
+  function scales() {
+    const u = H / 1000;
+    sMin = Math.max(1.5, P.dark * u);
+    sMax = Math.max(sMin * 1.2, P.light * u);
+  }
+
+  // bilinear sample of a field grid at a screen position
+  function sample(g, x, y) {
+    const FW = F.FW, FH = F.FH;
+    let fx = x / W * FW - 0.5, fy = y / H * FH - 0.5;
+    if (fx < 0) fx = 0; else if (fx > FW - 1.001) fx = FW - 1.001;
+    if (fy < 0) fy = 0; else if (fy > FH - 1.001) fy = FH - 1.001;
+    const x0 = fx | 0, y0 = fy | 0, tx = fx - x0, ty = fy - y0, k = y0 * FW + x0;
+    const a = g[k] + (g[k + 1] - g[k]) * tx;
+    const b = g[k + FW] + (g[k + FW + 1] - g[k + FW]) * tx;
+    return a + (b - a) * ty;
+  }
+
+  function sampleNodes() {
+    const gamma = P.contrast, range = sMax - sMin, lum = F.lum, lumMin = F.lumMin, mask = F.mask;
+    const hx = W / F.FW * 1.5, hy = H / F.FH * 1.5;
+    maskOn = F.maskOn;
+    let outside = 0;
+    for (let i = 0; i < n; i++) {
+      const x = X[i], y = Y[i];
+      SP[i] = sMin + range * Math.pow(sample(lum, x, y), gamma);
+      // tightest spacing within reach (lumMin is the darkest value nearby); caps how far a point may move
+      SPM[i] = sMin + range * Math.pow(sample(lumMin, x, y), gamma);
+      if (!maskOn) { MK[i] = 1; continue; }
+      const m = sample(mask, x, y);
+      MK[i] = m;
+      if (m < 0.5) {
+        outside++;
+        // outside the body: find the way back in
+        let gx = sample(mask, x + hx, y) - sample(mask, x - hx, y);
+        let gy = sample(mask, x, y + hy) - sample(mask, x, y - hy);
+        let g = Math.sqrt(gx * gx + gy * gy);
+        if (g < 1e-3) { gx = F.bodyX * W - x; gy = F.bodyY * H - y; g = Math.sqrt(gx * gx + gy * gy) || 1; }
+        GX[i] = gx / g; GY[i] = gy / g;
+      }
+    }
+    return outside;
+  }
+
+  function buildGrid() {
+    cellSize = Math.max(sMin, sMax / 3);
+    gCols = Math.ceil(W / cellSize) + 1; gRows = Math.ceil(H / cellSize) + 1;
+    const nc = gCols * gRows;
+    if (cellStart.length < nc + 1) { cellStart = new Int32Array(nc + 1); cursor = new Int32Array(nc + 1); }
+    cellStart.fill(0, 0, nc + 1);
+    const inv = 1 / cellSize;
+    for (let i = 0; i < n; i++) {
+      let cx = (X[i] * inv) | 0, cy = (Y[i] * inv) | 0;
+      if (cx < 0) cx = 0; else if (cx >= gCols) cx = gCols - 1;
+      if (cy < 0) cy = 0; else if (cy >= gRows) cy = gRows - 1;
+      const c = cy * gCols + cx;
+      cellOf[i] = c; cellStart[c + 1]++;
+    }
+    for (let c = 0; c < nc; c++) cellStart[c + 1] += cellStart[c];
+    cursor.set(cellStart.subarray(0, nc));
+    // copy positions in cell order so neighbour reads are contiguous in memory
+    for (let i = 0; i < n; i++) { const p = cursor[cellOf[i]]++; SI[p] = i; SX[p] = X[i]; SY[p] = Y[i]; SS[p] = SP[i]; }
+  }
+
+  function step() {
+    if (n < 3 || !F) return;
+    scales();
+    const outside = sampleNodes();
+    // most of the line stranded outside the body for a while (you walked off and came back): start over
+    lost = maskOn && outside > n * 0.7 ? lost + 1 : 0;
+    if (lost > 150) { lost = 0; seed(F.headX * W, F.headY * H); return; }
+    buildGrid();
+    const kAlign = P.smooth, inv = 1 / cellSize;
+    const kRep = T.rep, kSpring = T.spring, edge = T.edge, kMask = T.mask, maxStep = T.maxStep, jitter = T.jitter;
+
+    // Repulsion. A pair pushes apart when closer than the tighter of its two spacings, so the
+    // push is equal and opposite and each pair is visited once: from its earlier point in cell
+    // order, scanning only cells that come later (same cell after it, cells to the right, rows below).
+    FXs.fill(0, 0, n); FYs.fill(0, 0, n); CNs.fill(0, 0, n);
+    for (let p = 0; p < n; p++) {
+      const x = SX[p], y = SY[p], R = SS[p], R2 = R * R, i = SI[p];
+      const ip = i === 0 ? n - 1 : i - 1, inx = i === n - 1 ? 0 : i + 1;
+      const k = Math.ceil(R * inv);
+      let cx = (x * inv) | 0, cy = (y * inv) | 0;
+      if (cx >= gCols) cx = gCols - 1;
+      if (cy >= gRows) cy = gRows - 1;
+      const myCell = cy * gCols + cx, y1 = Math.min(gRows - 1, cy + k);
+      const xl = Math.max(0, cx - k), xr = Math.min(gCols - 1, cx + k);
+      let fx = 0, fy = 0, cnt = 0;
+      for (let gy = cy; gy <= y1; gy++) {
+        const base = gy * gCols;
+        for (let gx = gy === cy ? cx : xl; gx <= xr; gx++) {
+          const c = base + gx;
+          for (let t = c === myCell ? p + 1 : cellStart[c], e = cellStart[c + 1]; t < e; t++) {
+            const dx = x - SX[t], dy = y - SY[t], d2 = dx * dx + dy * dy;
+            if (d2 >= R2) continue;
+            const Rj = SS[t], Rij = Rj < R ? Rj : R;
+            if (d2 >= Rij * Rij || d2 < 1e-8) continue;
+            const j = SI[t];
+            if (j === ip || j === inx) continue; // neighbours along the line are handled by the spring
+            const d = Math.sqrt(d2), f = (Rij - d) / d, ox = dx * f, oy = dy * f;
+            fx += ox; fy += oy; cnt++;
+            FXs[t] -= ox; FYs[t] -= oy; CNs[t]++;
+          }
+        }
+      }
+      FXs[p] += fx; FYs[p] += fy; CNs[p] += cnt;
+    }
+
+    for (let p = 0; p < n; p++) {
+      const i = SI[p];
+      DX[i] = FXs[p]; DY[i] = FYs[p]; CNT[i] = CNs[p];
+    }
+
+    for (let i = 0; i < n; i++) {
+      const x = X[i], y = Y[i], R = SP[i];
+      const ip = i === 0 ? n - 1 : i - 1, inx = i === n - 1 ? 0 : i + 1;
+      const rx = DX[i], ry = DY[i];
+      // spring to both neighbours along the line
+      let sx = 0, sy = 0;
+      {
+        let ex = x - X[ip], ey = y - Y[ip], L = Math.sqrt(ex * ex + ey * ey) || 1e-3;
+        let f = (edge * (R + SP[ip]) * 0.5 - L) / L; sx += ex * f; sy += ey * f;
+        ex = x - X[inx]; ey = y - Y[inx]; L = Math.sqrt(ex * ex + ey * ey) || 1e-3;
+        f = (edge * (R + SP[inx]) * 0.5 - L) / L; sx += ex * f; sy += ey * f;
+      }
+      let dx = rx * kRep + sx * kSpring + ((X[ip] + X[inx]) * 0.5 - x) * kAlign;
+      let dy = ry * kRep + sy * kSpring + ((Y[ip] + Y[inx]) * 0.5 - y) * kAlign;
+      if (maskOn && MK[i] < 0.5) {
+        const w = (0.5 - MK[i]) * 2 + 0.25;
+        dx += GX[i] * R * kMask * w; dy += GY[i] * R * kMask * w;
+      }
+      dx += (Math.random() - 0.5) * R * jitter;
+      dy += (Math.random() - 0.5) * R * jitter;
+      // never move further than a fraction of the tightest spacing nearby (outside the body there is nothing to cross)
+      const lim = (maskOn && MK[i] < 0.5 ? R * 0.5 : SPM[i] * maxStep), m2 = dx * dx + dy * dy;
+      if (m2 > lim * lim) { const s = lim / Math.sqrt(m2); dx *= s; dy *= s; }
+      DX[i] = dx; DY[i] = dy;
+    }
+    for (let i = 0; i < n; i++) {
+      let x = X[i] + DX[i], y = Y[i] + DY[i];
+      if (x < 1) x = 1; else if (x > W - 1) x = W - 1;
+      if (y < 1) y = 1; else if (y > H - 1) y = H - 1;
+      X[i] = x; Y[i] = y;
+    }
+    resample();
+  }
+
+  // split long edges, grow where there is room, drop short or crowded points, trim to budget
+  function resample() {
+    const cap = Math.min(CAP - 2, P.detail);
+    const over = n > cap;
+    // over budget (Detail was lowered): drop the most crowded points a little faster
+    const crowdCut = over ? Math.max(4, T.crowdMin - 6) : T.crowdMin, pruneP = over ? 0.25 : T.prune;
+    const { merge, split, grow, growMin, roomMax, shed } = T;
+    X2[0] = X[0]; Y2[0] = Y[0]; S2[0] = SP[0];
+    let m = 1, lx = X[0], ly = Y[0], ls = SP[0], skipped = false;
+    for (let i = 1; i <= n; i++) {
+      const wrap = i === n, ii = wrap ? 0 : i;
+      const x = X[ii], y = Y[ii], s = SP[ii], c = CNT[ii], mk = MK[ii];
+      const ex = x - lx, ey = y - ly, L = Math.sqrt(ex * ex + ey * ey), sm = (s + ls) * 0.5;
+      const left = n - i; // points still to copy after this one
+      // outside the body the line sheds points and never splits, so the spring pulls it back like a rubber band
+      if (!wrap && !skipped && m + left > MIN_POINTS &&
+          (L < merge * sm || (c > crowdCut && Math.random() < pruneP) || (mk < 0.3 && Math.random() < shed))) { skipped = true; continue; }
+      skipped = false;
+      if (mk > 0.5 && m + left + 1 < cap && (L > split * sm || (L > growMin * sm && c < roomMax && Math.random() < grow))) {
+        X2[m] = lx + ex * 0.5; Y2[m] = ly + ey * 0.5; S2[m] = sm; m++;
+      }
+      if (wrap) break;
+      X2[m] = x; Y2[m] = y; S2[m] = s; m++;
+      lx = x; ly = y; ls = s;
+    }
+    let t = X; X = X2; X2 = t; t = Y; Y = Y2; Y2 = t; t = SP; SP = S2; S2 = t;
+    n = m;
+  }
+
+  function seed(x, y) {
+    scales();
+    // size the starting ring to the spacing under it, so it doesn't merge away in light areas
+    const s = F ? sMin + (sMax - sMin) * Math.pow(sample(F.lum, x, y), P.contrast) : sMin;
+    const count = 16, r = s * 1.5;
+    n = 0;
+    for (let k = 0; k < count; k++) {
+      const a = (k / count) * Math.PI * 2;
+      X[n] = x + Math.cos(a) * r; Y[n] = y + Math.sin(a) * r; SP[n] = s; CNT[n] = 0; n++;
+    }
+  }
+
+  function setSize(w, h) {
+    if (n && W > 1) {
+      const sx = w / W, sy = h / H;
+      for (let i = 0; i < n; i++) { X[i] *= sx; Y[i] *= sy; }
+    }
+    W = w; H = h;
+  }
+
+  // interleaved x,y copy for drawing
+  function points() {
+    const out = new Float32Array(n * 2);
+    for (let i = 0; i < n; i++) { out[2 * i] = X[i]; out[2 * i + 1] = Y[i]; }
+    return out;
+  }
+
+  return {
+    T, step, seed, setSize, points,
+    setParams(p) { Object.assign(P, p); },
+    setField(f) { F = f; },
+    ready() { return !!F && n > 2; },
+    get n() { return n; },
+    dump() { return { W, H, sMin, sMax, cell: cellSize, X: X.slice(0, n), Y: Y.slice(0, n), SP: SP.slice(0, n) }; },
+  };
+}
+</script>
+
+<script type="module">
+const MP_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+const MODEL_URL = "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite";
+
+const $ = (id) => document.getElementById(id);
+const canvas = $("stage");
+const ctx = canvas.getContext("2d");
+const video = $("cam");
+let W = 0, H = 0, dpr = 1; // canvas size in CSS pixels
+
+// ---- settings --------------------------------------------------------------
+const ui = {};
+const fmt = {
+  detail: (v) => (v / 1000).toFixed(1) + "k",
+  dark: (v) => (+v).toFixed(1),
+  light: (v) => String(v),
+  contrast: (v) => (+v).toFixed(2),
+  local: (v) => (+v).toFixed(1),
+  weight: (v) => (+v).toFixed(1),
+  speed: (v) => v + "x",
+  smooth: (v) => (+v).toFixed(2),
+};
+for (const id of Object.keys(fmt)) {
+  const el = $(id), out = $(id + "Out");
+  const sync = () => { ui[id] = parseFloat(el.value); out.textContent = fmt[id](el.value); };
+  el.addEventListener("input", () => { sync(); sendParams(); });
+  sync();
+}
+for (const id of ["follow", "mirror", "invert", "showCam"]) {
+  const el = $(id);
+  const sync = () => { ui[id] = el.checked; if (id === "invert") document.documentElement.toggleAttribute("data-invert", el.checked); };
+  el.addEventListener("change", sync);
+  sync();
+}
+
+// ---- simulation host: worker if possible, otherwise on the page ------------------
+const WORKER_GLUE = `
+const sim = createSim();
+let paused = false, speed = 2, last = performance.now(), budget = 0, stepMs = 0;
+function post(steps) { const pts = sim.points(); postMessage({ type: "pos", n: sim.n, pts, steps, stepMs }, [pts.buffer]); }
+onmessage = (e) => {
+  const m = e.data;
+  if (m.type === "field") sim.setField(m.field);
+  else if (m.type === "params") { sim.setParams(m.params); speed = m.params.speed; }
+  else if (m.type === "size") sim.setSize(m.W, m.H);
+  else if (m.type === "seed") { sim.seed(m.x, m.y); post(0); }
+  else if (m.type === "pause") paused = m.paused;
+  else if (m.type === "tune") Object.assign(sim.T, m.tune);
+  else if (m.type === "dump") postMessage({ type: "dump", dump: sim.dump() });
+};
+function loop() {
+  const now = performance.now();
+  if (!paused && sim.ready()) {
+    // aim for speed x 60 steps a second; fall behind gracefully on slow machines
+    budget = Math.min(budget + (now - last) * speed * 0.06, 6);
+    let steps = 0;
+    while (budget >= 1 && performance.now() - now < 40) { sim.step(); budget -= 1; steps++; }
+    if (steps) { stepMs = stepMs * 0.8 + ((performance.now() - now) / steps) * 0.2; post(steps); }
+  } else budget = 0;
+  last = now;
+  setTimeout(loop, 2);
+}
+loop();
+`;
+
+let worker = null, local = null;
+let pts = new Float32Array(0), pn = 0, stepCount = 0, stepMs = 0, lastDump = null;
+
+function startLocal() {
+  if (worker) { worker.terminate(); worker = null; }
+  local = createSim(); // defined by the sim-src script
+  sendSize(); sendParams();
+}
+try {
+  const src = $("sim-src").textContent + WORKER_GLUE;
+  worker = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
+  worker.onmessage = (e) => {
+    const m = e.data;
+    if (m.type === "pos") { pts = m.pts; pn = m.n; stepCount += m.steps; stepMs = m.stepMs; }
+    else if (m.type === "dump") lastDump = m.dump;
+  };
+  worker.onerror = (e) => { console.warn("Worker failed, running on the page", e.message); startLocal(); };
+} catch (e) {
+  startLocal();
+}
+function toSim(msg, transfer) {
+  if (worker) { worker.postMessage(msg, transfer || []); return; }
+  if (!local) return;
+  if (msg.type === "field") local.setField(msg.field);
+  else if (msg.type === "params") local.setParams(msg.params);
+  else if (msg.type === "size") local.setSize(msg.W, msg.H);
+  else if (msg.type === "seed") { local.seed(msg.x, msg.y); pts = local.points(); pn = local.n; }
+  else if (msg.type === "tune") Object.assign(local.T, msg.tune);
+}
+function sendParams() {
+  toSim({ type: "params", params: { detail: ui.detail, dark: ui.dark, light: ui.light, contrast: ui.contrast, smooth: ui.smooth, speed: ui.speed } });
+}
+function sendSize() { toSim({ type: "size", W, H }); }
+function seed(x, y) { toSim({ type: "seed", x, y }); }
+
+// ---- canvas size -----------------------------------------------------------
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+  allocField();
+  sendSize();
+}
+
+// ---- field (brightness + body mask), sampled at low resolution ---------------
+const fieldCanvas = document.createElement("canvas");
+const fctx = fieldCanvas.getContext("2d", { willReadFrequently: true });
+let FW = 0, FH = 0;
+let lumRaw, lum, lumBig, lumMin, tmp, mask, maskNew, maskB;
+let haveMaskFrame = false, fieldReady = false;
+let levelLo = 0.1, levelHi = 0.9;
+let headX = 0.5, headY = 0.3, bodyX = 0.5, bodyY = 0.5, maskArea = 0;
+
+function allocField() {
+  const long = 320;
+  if (W >= H) { FW = long; FH = Math.max(16, Math.round(long * H / W)); }
+  else { FH = long; FW = Math.max(16, Math.round(long * W / H)); }
+  fieldCanvas.width = FW; fieldCanvas.height = FH;
+  const N = FW * FH;
+  lumRaw = new Float32Array(N); lum = new Float32Array(N); lumBig = new Float32Array(N); lumMin = new Float32Array(N); tmp = new Float32Array(N);
+  mask = new Float32Array(N).fill(1); maskNew = new Float32Array(N).fill(1); maskB = new Float32Array(N).fill(1);
+  haveMaskFrame = false;
+}
+
+// draw the video into a w x h context with cover fit, optionally mirrored
+function drawVideoCover(c, w, h) {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) return false;
+  const a = vw / vh, A = w / h;
+  let sx = 0, sy = 0, sw = vw, sh = vh;
+  if (a > A) { sw = vh * A; sx = (vw - sw) / 2; } else { sh = vw / A; sy = (vh - sh) / 2; }
+  c.save();
+  if (ui.mirror) { c.translate(w, 0); c.scale(-1, 1); }
+  c.drawImage(video, sx, sy, sw, sh, 0, 0, w, h);
+  c.restore();
+  return true;
+}
+
+function minFilter(src, dst, w, h, r) {
+  // separable min filter (erode), src -> dst (uses tmp)
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    for (let x = 0; x < w; x++) {
+      let m = 1e9;
+      for (let k = Math.max(0, x - r), e = Math.min(w - 1, x + r); k <= e; k++) if (src[row + k] < m) m = src[row + k];
+      tmp[row + x] = m;
+    }
+  }
+  for (let x = 0; x < w; x++) {
+    for (let y = 0; y < h; y++) {
+      let m = 1e9;
+      for (let k = Math.max(0, y - r), e = Math.min(h - 1, y + r); k <= e; k++) if (tmp[k * w + x] < m) m = tmp[k * w + x];
+      dst[y * w + x] = m;
+    }
+  }
+}
+
+function boxBlur(src, dst, w, h, r) {
+  // separable box blur, src -> dst (uses tmp)
+  const inv = 1 / (2 * r + 1);
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    let acc = 0;
+    for (let k = -r; k <= r; k++) acc += src[row + Math.min(w - 1, Math.max(0, k))];
+    for (let x = 0; x < w; x++) {
+      tmp[row + x] = acc * inv;
+      acc += src[row + Math.min(w - 1, x + r + 1)] - src[row + Math.max(0, x - r)];
+    }
+  }
+  for (let x = 0; x < w; x++) {
+    let acc = 0;
+    for (let k = -r; k <= r; k++) acc += tmp[Math.min(h - 1, Math.max(0, k)) * w + x];
+    for (let y = 0; y < h; y++) {
+      dst[y * w + x] = acc * inv;
+      acc += tmp[Math.min(h - 1, y + r + 1) * w + x] - tmp[Math.max(0, y - r) * w + x];
+    }
+  }
+}
+
+let segmenter = null, lastTs = 0;
+const hist = new Float32Array(64);
+
+function updateField() {
+  if (!drawVideoCover(fctx, FW, FH)) return;
+  const N = FW * FH;
+  const d = fctx.getImageData(0, 0, FW, FH).data;
+  for (let k = 0, p = 0; k < N; k++, p += 4) lumRaw[k] = (d[p] * 0.299 + d[p + 1] * 0.587 + d[p + 2] * 0.114) / 255;
+
+  // body mask
+  if (segmenter && ui.follow) {
+    let ts = performance.now(); if (ts <= lastTs) ts = lastTs + 1; lastTs = ts;
+    try {
+      segmenter.segmentForVideo(fieldCanvas, ts, (res) => {
+        const m = res.confidenceMasks && res.confidenceMasks[0];
+        if (!m) return;
+        const arr = m.getAsFloat32Array();
+        if (arr.length === N) { maskNew.set(arr); haveMaskFrame = true; }
+      });
+    } catch (e) { console.warn(e); }
+  } else {
+    maskNew.fill(1); haveMaskFrame = true;
+  }
+  for (let k = 0; k < N; k++) mask[k] = mask[k] * 0.3 + maskNew[k] * 0.7;
+
+  // brightness: light blur, local contrast (large-radius unsharp mask), then auto levels inside the body
+  boxBlur(lumRaw, lum, FW, FH, 1);
+  if (ui.local > 0) {
+    const r = Math.max(2, Math.round(Math.max(FW, FH) * 0.04));
+    boxBlur(lum, lumBig, FW, FH, r);
+    boxBlur(lumBig, lumBig, FW, FH, r);
+    const a = ui.local;
+    for (let k = 0; k < N; k++) lum[k] += (lum[k] - lumBig[k]) * a;
+  }
+  hist.fill(0);
+  let tot = 0, ax = 0, ay = 0, top = FH;
+  for (let y = 0; y < FH; y++) for (let x = 0; x < FW; x++) {
+    const k = y * FW + x;
+    if (mask[k] > 0.5) { hist[Math.min(63, Math.max(0, (lum[k] * 64) | 0))] += 1; tot++; ax += x; ay += y; if (y < top) top = y; }
+  }
+  maskArea = tot / N;
+  if (tot > 50) {
+    let c = 0, lo = 0, hi = 63;
+    for (let b = 0; b < 64; b++) { c += hist[b]; if (c >= tot * 0.02) { lo = b; break; } }
+    c = 0;
+    for (let b = 63; b >= 0; b--) { c += hist[b]; if (c >= tot * 0.02) { hi = b; break; } }
+    const L = lo / 64, Hh = (hi + 1) / 64;
+    levelLo += (L - levelLo) * 0.1; levelHi += (Math.max(L + 0.1, Hh) - levelHi) * 0.1;
+    bodyX = ax / tot / FW; bodyY = ay / tot / FH;
+    // head point: centroid of the top slice of the body
+    const limit = Math.min(FH, top + Math.max(6, (bodyY * FH - top) * 0.6));
+    let hx = 0, hy = 0, hc = 0;
+    for (let y = top; y < limit; y++) for (let x = 0; x < FW; x++) {
+      if (mask[y * FW + x] > 0.5) { hx += x; hy += y; hc++; }
+    }
+    if (hc) { headX = hx / hc / FW; headY = hy / hc / FH; }
+  }
+  const span = 1 / Math.max(0.05, levelHi - levelLo);
+  for (let k = 0; k < N; k++) { const v = (lum[k] - levelLo) * span; lum[k] = v < 0 ? 0 : v > 1 ? 1 : v; }
+  // darkest value within one light-spacing: tells the simulation how tight the lines nearby are
+  minFilter(lum, lumMin, FW, FH, Math.max(1, Math.ceil(ui.light * FH / 1000)));
+
+  // soft mask edge
+  boxBlur(mask, maskB, FW, FH, 3);
+  boxBlur(maskB, maskB, FW, FH, 3);
+  if (haveMaskFrame) fieldReady = true;
+
+  const field = {
+    FW, FH, lum: lum.slice(), lumMin: lumMin.slice(), mask: maskB.slice(),
+    maskOn: !!(ui.follow && segmenter && maskArea > 0.003), bodyX, bodyY, headX, headY,
+  };
+  toSim({ type: "field", field }, [field.lum.buffer, field.lumMin.buffer, field.mask.buffer]);
+}
+
+function seedAtHead() {
+  if (ui.follow && segmenter && maskArea > 0.003) seed(headX * W, headY * H);
+  else seed(W * 0.5, H * 0.4);
+}
+
+// ---- drawing ------------------------------------------------------------------
+function colors() {
+  const cs = getComputedStyle(document.documentElement);
+  return { paper: cs.getPropertyValue("--paper").trim(), ink: cs.getPropertyValue("--ink").trim() };
+}
+const lineWidth = () => ui.weight * Math.max(0.6, H / 1000);
+
+function draw() {
+  const { paper, ink } = colors();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = paper;
+  ctx.fillRect(0, 0, W, H);
+  if (ui.showCam && video.videoWidth) {
+    ctx.globalAlpha = 0.22;
+    drawVideoCover(ctx, W, H);
+    ctx.globalAlpha = 1;
+  }
+  const n = pn, p = pts;
+  if (n < 3) return;
+  // quadratic curves through the midpoints keep the line smooth at any point density
+  ctx.beginPath();
+  ctx.moveTo((p[2 * n - 2] + p[0]) * 0.5, (p[2 * n - 1] + p[1]) * 0.5);
+  for (let i = 0; i < n; i++) {
+    const j = i === n - 1 ? 0 : i + 1;
+    ctx.quadraticCurveTo(p[2 * i], p[2 * i + 1], (p[2 * i] + p[2 * j]) * 0.5, (p[2 * i + 1] + p[2 * j + 1]) * 0.5);
+  }
+  ctx.closePath();
+  ctx.lineWidth = lineWidth();
+  ctx.lineJoin = "round"; ctx.lineCap = "round";
+  ctx.strokeStyle = ink;
+  ctx.stroke();
+}
+
+function svgString() {
+  const { paper, ink } = colors();
+  const n = pn, p = pts, f = (v) => v.toFixed(1);
+  let d = `M${f((p[2 * n - 2] + p[0]) / 2)} ${f((p[2 * n - 1] + p[1]) / 2)}`;
+  for (let i = 0; i < n; i++) {
+    const j = i === n - 1 ? 0 : i + 1;
+    d += `Q${f(p[2 * i])} ${f(p[2 * i + 1])} ${f((p[2 * i] + p[2 * j]) / 2)} ${f((p[2 * i + 1] + p[2 * j + 1]) / 2)}`;
+  }
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}"><rect width="100%" height="100%" fill="${paper}"/><path d="${d}Z" fill="none" stroke="${ink}" stroke-width="${lineWidth().toFixed(2)}" stroke-linejoin="round"/></svg>`;
+}
+function download(blob, name) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+const stamp = () => new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+function savePng() { canvas.toBlob((b) => b && download(b, `elastic-loop-${stamp()}.png`), "image/png"); }
+function saveSvg() { if (pn > 2) download(new Blob([svgString()], { type: "image/svg+xml" }), `elastic-loop-${stamp()}.svg`); }
+
+// ---- main loop ----------------------------------------------------------------
+let running = false, paused = false, seeded = false, waitFrames = 0;
+let fps = 0, lastT = performance.now(), statT = 0, statSteps = 0, stepsPerSec = 0;
+const stats = $("stats");
+
+function frame(t) {
+  requestAnimationFrame(frame);
+  const dt = t - lastT; lastT = t;
+  fps = fps * 0.92 + (1000 / Math.max(1, dt)) * 0.08;
+  if (video.readyState >= 2) updateField();
+  if (fieldReady && !seeded) {
+    // give the body mask a moment to settle before planting the seed
+    if (++waitFrames > 8 || !segmenter || !ui.follow) { seedAtHead(); seeded = true; }
+  }
+  if (local && !paused && seeded) {
+    const t0 = performance.now();
+    for (let s = 0; s < ui.speed; s++) local.step();
+    stepCount += ui.speed; stepMs = (performance.now() - t0) / ui.speed;
+    pts = local.points(); pn = local.n;
+  }
+  draw();
+  if (t - statT > 500) {
+    stepsPerSec = (stepCount - statSteps) * 1000 / (t - statT);
+    statT = t; statSteps = stepCount;
+    stats.textContent = `${pn.toLocaleString()} pts · ${fps.toFixed(0)} fps · ${stepsPerSec.toFixed(0)} steps/s`;
+  }
+}
+
+function begin() {
+  $("start").hidden = true;
+  $("panel").hidden = false;
+  if (!running) { running = true; requestAnimationFrame(frame); }
+  seeded = false; waitFrames = 0;
+}
+
+async function startCamera() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" }, audio: false,
+    });
+    video.srcObject = stream;
+    await video.play();
+    $("mirror").checked = true; ui.mirror = true;
+    begin();
+  } catch (e) {
+    cameraBlocked = true;
+    $("segText").textContent = "Can't reach the camera. Allow camera access in the address bar, or use a video file.";
+    $("segDot").className = "dot live";
+  }
+}
+function startFile(file) {
+  if (!file) return;
+  video.srcObject = null;
+  video.src = URL.createObjectURL(file);
+  video.loop = true; video.muted = true;
+  video.play().then(() => {
+    $("mirror").checked = false; ui.mirror = false;
+    begin();
+  });
+}
+
+// ---- body segmentation (optional) ----------------------------------------------
+let cameraBlocked = false;
+function setSegStatus(text, cls) {
+  if (!cameraBlocked) { $("segText").textContent = text; $("segDot").className = "dot " + cls; }
+  $("segText2").textContent = text; $("segDot2").className = "dot " + cls;
+}
+async function loadSegmenter() {
+  try {
+    const { FilesetResolver, ImageSegmenter } = await import(MP_URL + "/vision_bundle.mjs");
+    const fileset = await FilesetResolver.forVisionTasks(MP_URL + "/wasm");
+    const make = (delegate) => ImageSegmenter.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: MODEL_URL, delegate },
+      runningMode: "VIDEO", outputConfidenceMasks: true, outputCategoryMask: false,
+    });
+    try { segmenter = await make("GPU"); } catch (e) { segmenter = await make("CPU"); }
+    setSegStatus("Body tracking: on", "ok");
+  } catch (e) {
+    console.warn("Segmentation unavailable", e);
+    segmenter = null;
+    setSegStatus("Body tracking is off because it needs internet, so the line fills the whole frame.", "");
+  }
+}
+
+// ---- input --------------------------------------------------------------------
+function togglePause() {
+  paused = !paused;
+  $("bPause").textContent = paused ? "Play" : "Pause";
+  toSim({ type: "pause", paused });
+}
+function toggleFull() {
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  else document.documentElement.requestFullscreen().catch(() => {});
+}
+function restart() { seedAtHead(); seeded = true; }
+
+$("btnCam").addEventListener("click", startCamera);
+$("fileIn").addEventListener("change", (e) => startFile(e.target.files[0]));
+$("bRestart").addEventListener("click", restart);
+$("bPause").addEventListener("click", togglePause);
+$("bFull").addEventListener("click", toggleFull);
+$("bPng").addEventListener("click", savePng);
+$("bSvg").addEventListener("click", saveSvg);
+$("bHide").addEventListener("click", () => { $("panel").hidden = true; });
+canvas.addEventListener("click", (e) => { if (running) { seed(e.clientX, e.clientY); seeded = true; } });
+window.addEventListener("keydown", (e) => {
+  if (!running || e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if (k === "h") $("panel").hidden = !$("panel").hidden;
+  else if (k === "r") restart();
+  else if (k === " ") { e.preventDefault(); togglePause(); }
+  else if (k === "f") toggleFull();
+  else if (k === "s") savePng();
+});
+window.addEventListener("resize", resize);
+
+resize();
+sendParams();
+loadSegmenter();
+
+// handle for tuning from the browser console, e.g. elasticLoop.tune({ grow: 0.1 })
+window.elasticLoop = {
+  get points() { return pn; },
+  get stepsPerSec() { return stepsPerSec; },
+  get steps() { return stepCount; },
+  get stepMs() { return stepMs; },
+  get worker() { return !!worker; },
+  tune: (t) => toSim({ type: "tune", tune: t }),
+  requestDump: () => { lastDump = null; toSim({ type: "dump" }); },
+  get dump() { return local ? local.dump() : lastDump; },
+  field: () => ({ FW, FH, mask: maskB, lum }),
+};
+</script>
+</body>
+</html>
