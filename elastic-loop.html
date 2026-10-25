@@ -169,6 +169,8 @@
       <label><input id="mirror" type="checkbox" checked>Mirror</label>
       <label><input id="invert" type="checkbox">Invert</label>
       <label><input id="showCam" type="checkbox">Show camera</label>
+      <label><input id="connect" type="checkbox" checked>Reach hands</label>
+      <label><input id="showMask" type="checkbox">Show mask</label>
     </div>
   </fieldset>
   <div class="buttons">
@@ -241,7 +243,7 @@ function createSim() {
   let F = null; // field: { FW, FH, lum, lumMin, mask, maskOn, bodyX, bodyY, headX, headY }
 
   function scales() {
-    const u = H / 1000;
+    const u = H / 1000 * (F && F.fit ? F.fit : 1); // fit widens the spacing when the point budget runs short
     sMin = Math.max(1.5, P.dark * u);
     sMax = Math.max(sMin * 1.2, P.light * u);
   }
@@ -392,9 +394,12 @@ function createSim() {
   // split long edges, grow where there is room, drop short or crowded points, trim to budget
   function resample() {
     const cap = Math.min(CAP - 2, P.detail);
-    const over = n > cap;
-    // over budget (Detail was lowered): drop the most crowded points a little faster
-    const crowdCut = over ? Math.max(4, T.crowdMin - 6) : T.crowdMin, pruneP = over ? 0.25 : T.prune;
+    const over = n > cap, full = n >= cap - 2;
+    // over budget (Detail was lowered): drop the most crowded points a little faster.
+    // At the budget: keep freeing a few points from crowded spots, so the line can still grow into
+    // new space (a hand coming into frame) instead of freezing once it has filled the body.
+    const crowdCut = over ? Math.max(4, T.crowdMin - 6) : full ? T.crowdMin - 3 : T.crowdMin;
+    const pruneP = over ? 0.25 : full ? 0.05 : T.prune;
     const { merge, split, grow, growMin, roomMax, shed } = T;
     X2[0] = X[0]; Y2[0] = Y[0]; S2[0] = SP[0];
     let m = 1, lx = X[0], ly = Y[0], ls = SP[0], skipped = false;
@@ -656,7 +661,7 @@ function setMode(mode) {
   if (running) restart(); // each mode starts from its own kind of seed
 }
 for (const id of ["modeGrow", "modeFixed"]) $(id).addEventListener("change", (e) => { if (e.target.checked) setMode(e.target.value); });
-for (const id of ["follow", "mirror", "invert", "showCam"]) {
+for (const id of ["follow", "mirror", "invert", "showCam", "connect", "showMask"]) {
   const el = $(id);
   const sync = () => { ui[id] = el.checked; if (id === "invert") document.documentElement.toggleAttribute("data-invert", el.checked); };
   el.addEventListener("change", sync);
@@ -754,6 +759,8 @@ function allocField() {
   const N = FW * FH;
   lumRaw = new Float32Array(N); lum = new Float32Array(N); lumBig = new Float32Array(N); lumMin = new Float32Array(N); tmp = new Float32Array(N);
   mask = new Float32Array(N).fill(1); maskNew = new Float32Array(N).fill(1); maskB = new Float32Array(N).fill(1);
+  labels = new Int32Array(N); bfsQ = new Int32Array(N); parent = new Int32Array(N);
+  corridor = new Float32Array(N); corrNew = new Float32Array(N); occ = new Float32Array(N);
   haveMaskFrame = false;
 }
 
@@ -812,6 +819,114 @@ function boxBlur(src, dst, w, h, r) {
   }
 }
 
+// ---- bridges to separate parts (a hand held out to the side, a second person) ----
+// The line is one loop and can only grow into space it can reach. When the body mask splits into
+// islands, draw a thin route from the island the line lives in to every other sizeable island, so
+// the line can travel along it as a tight band and fill that island too.
+let labels, bfsQ, parent, corridor, corrNew;
+function updateCorridors() {
+  const N = FW * FH;
+  labels.fill(0);
+  const areas = [0];
+  let nl = 0;
+  for (let s = 0; s < N; s++) {
+    if (labels[s] || mask[s] <= 0.5) continue;
+    nl++;
+    let head = 0, tail = 0, area = 0;
+    bfsQ[tail++] = s; labels[s] = nl;
+    while (head < tail) {
+      const k = bfsQ[head++], x = k % FW;
+      area++;
+      if (x > 0 && !labels[k - 1] && mask[k - 1] > 0.5) { labels[k - 1] = nl; bfsQ[tail++] = k - 1; }
+      if (x < FW - 1 && !labels[k + 1] && mask[k + 1] > 0.5) { labels[k + 1] = nl; bfsQ[tail++] = k + 1; }
+      if (k >= FW && !labels[k - FW] && mask[k - FW] > 0.5) { labels[k - FW] = nl; bfsQ[tail++] = k - FW; }
+      if (k < N - FW && !labels[k + FW] && mask[k + FW] > 0.5) { labels[k + FW] = nl; bfsQ[tail++] = k + FW; }
+    }
+    areas.push(area);
+  }
+  corrNew.fill(0);
+  if (nl > 1) {
+    // the island the line lives in: the one holding most of its points (before there's a line, the biggest)
+    const votes = new Int32Array(nl + 1);
+    for (let i = 0; i < pn; i += 31) {
+      const fx = (pts[2 * i] / W * FW) | 0, fy = (pts[2 * i + 1] / H * FH) | 0;
+      if (fx >= 0 && fx < FW && fy >= 0 && fy < FH) votes[labels[fy * FW + fx]]++;
+    }
+    let main = 0, best = 0;
+    for (let l = 1; l <= nl; l++) if (votes[l] > best) { best = votes[l]; main = l; }
+    if (!main) for (let l = 1; l <= nl; l++) if (areas[l] > best) { best = areas[l]; main = l; }
+    const minArea = N * 0.004;
+    let need = 0;
+    for (let l = 1; l <= nl; l++) if (l !== main && areas[l] >= minArea) need++;
+    if (need) {
+      // spread outward from the main island; the first time it touches another island, that route is the shortest
+      parent.fill(-1);
+      let head = 0, tail = 0;
+      for (let k = 0; k < N; k++) if (labels[k] === main) { parent[k] = k; bfsQ[tail++] = k; }
+      const reached = new Uint8Array(nl + 1);
+      while (head < tail && need > 0) {
+        const k = bfsQ[head++], x = k % FW, y = (k / FW) | 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          const ny = y + dy;
+          if (ny < 0 || ny >= FH) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            const nx = x + dx;
+            if ((!dx && !dy) || nx < 0 || nx >= FW) continue;
+            const q = ny * FW + nx;
+            if (parent[q] !== -1) continue;
+            parent[q] = k; bfsQ[tail++] = q;
+            const l = labels[q];
+            if (l && l !== main && !reached[l] && areas[l] >= minArea) {
+              reached[l] = 1; need--;
+              // a straight route between the two closest points of the islands
+              let p = k;
+              while (labels[p] !== main) p = parent[p];
+              const x0 = p % FW, y0 = (p / FW) | 0, steps = Math.max(Math.abs(nx - x0), Math.abs(ny - y0), 1);
+              for (let s = 0; s <= steps; s++) {
+                corrNew[Math.round(y0 + (ny - y0) * s / steps) * FW + Math.round(x0 + (nx - x0) * s / steps)] = 1;
+              }
+              // flare the mouth where it leaves the body, so the line has room to fold into it
+              const rf = Math.max(2, Math.ceil(ui.light * FH / 1000 * fit * 1.5));
+              for (let fy = -rf; fy <= rf; fy++) for (let fx = -rf; fx <= rf; fx++) {
+                const xx = x0 + fx, yy = y0 + fy;
+                if (fx * fx + fy * fy <= rf * rf && xx >= 0 && xx < FW && yy >= 0 && yy < FH) corrNew[yy * FW + xx] = 1;
+              }
+            }
+          }
+        }
+      }
+      // the tracker is often unsure about small or blurry parts (a hand close to the lens), so treat
+      // every island it reached as solid body
+      for (let k = 0; k < N; k++) if (labels[k] && labels[k] !== main && reached[labels[k]]) corrNew[k] = 1;
+    }
+  }
+  // widen the one-cell routes to 7 cells (the blur spreads a line to 1/7 strength, so scale back up),
+  // so a hairpin of tight lines fits; fade them in and out over a few frames
+  boxBlur(corrNew, corrNew, FW, FH, 3);
+  for (let k = 0; k < N; k++) corridor[k] = Math.max(corridor[k] * 0.85, Math.min(1, corrNew[k] * 7));
+}
+
+// ---- fit the drawing to the point budget ----
+// If the line has used all its points but parts of the body are still empty, widen the spacing a
+// little at a time until it covers everything; ease back toward the slider values when it fits.
+let occ, fit = 1, coverage = 1;
+function updateFit() {
+  const N = FW * FH;
+  occ.fill(0);
+  for (let i = 0; i < pn; i++) {
+    const fx = (pts[2 * i] / W * FW) | 0, fy = (pts[2 * i + 1] / H * FH) | 0;
+    if (fx >= 0 && fx < FW && fy >= 0 && fy < FH) occ[fy * FW + fx] = 1;
+  }
+  boxBlur(occ, occ, FW, FH, Math.max(1, Math.ceil(ui.light * FH / 1000 * fit)));
+  let body = 0, covered = 0;
+  for (let k = 0; k < N; k++) if (maskB[k] > 0.5) { body++; if (occ[k] > 0.001) covered++; }
+  coverage = body ? covered / body : 1;
+  const atBudget = pn >= ui.detail * 0.97; // at the budget the line frees and reuses points, so n hovers just under it
+  // widen while out of points with empty areas left; tighten only when there are spare points; else hold
+  if (atBudget) { if (coverage < 0.93) fit = Math.min(3, fit * 1.01); }
+  else fit = Math.max(1, fit / 1.003);
+}
+
 let segmenter = null, lastTs = 0;
 const hist = new Float32Array(64);
 
@@ -836,6 +951,9 @@ function updateField() {
     maskNew.fill(1); haveMaskFrame = true;
   }
   for (let k = 0; k < N; k++) mask[k] = mask[k] * 0.3 + maskNew[k] * 0.7;
+  // bridges are for grow mode: a fixed loop can't drop points when a bridge comes and goes, and tangles
+  const bridging = !!(segmenter && ui.follow && ui.connect && ui.mode === "grow");
+  if (bridging) updateCorridors(); else corridor.fill(0);
 
   // brightness: light blur, local contrast (large-radius unsharp mask), then auto levels inside the body
   boxBlur(lumRaw, lum, FW, FH, 1);
@@ -871,17 +989,22 @@ function updateField() {
   }
   const span = 1 / Math.max(0.05, levelHi - levelLo);
   for (let k = 0; k < N; k++) { const v = (lum[k] - levelLo) * span; lum[k] = v < 0 ? 0 : v > 1 ? 1 : v; }
+  // bridges are drawn tight, so the line crosses as a thin band
+  if (bridging) for (let k = 0; k < N; k++) { const b = 1 - corridor[k] * 0.8; if (lum[k] > b) lum[k] = b; }
   // darkest value within one light-spacing: tells the simulation how tight the lines nearby are
   minFilter(lum, lumMin, FW, FH, Math.max(1, Math.ceil(ui.light * FH / 1000)));
 
   // soft mask edge
   boxBlur(mask, maskB, FW, FH, 3);
   boxBlur(maskB, maskB, FW, FH, 3);
+  if (bridging) for (let k = 0; k < N; k++) if (corridor[k] > maskB[k]) maskB[k] = corridor[k];
   if (haveMaskFrame) fieldReady = true;
+  // (a fixed loop always holds its full point count and sets its own length, so it doesn't use this)
+  if (ui.mode === "grow" && seeded && pn > 2) updateFit(); else fit = 1;
 
   const field = {
     FW, FH, lum: lum.slice(), lumMin: lumMin.slice(), mask: maskB.slice(),
-    maskOn: !!(ui.follow && segmenter && maskArea > 0.003), bodyX, bodyY, headX, headY,
+    maskOn: !!(ui.follow && segmenter && maskArea > 0.003), bodyX, bodyY, headX, headY, fit,
   };
   toSim({ type: "field", field }, [field.lum.buffer, field.lumMin.buffer, field.mask.buffer]);
 }
@@ -898,6 +1021,24 @@ function colors() {
 }
 const lineWidth = () => ui.weight * Math.max(0.6, H / 1000);
 
+// what the tracker sees: body in red, bridges to separate parts in blue
+const maskCanvas = document.createElement("canvas"), mctx = maskCanvas.getContext("2d");
+let maskImg = null;
+function drawMask() {
+  if (!maskImg || maskCanvas.width !== FW || maskCanvas.height !== FH) {
+    maskCanvas.width = FW; maskCanvas.height = FH; maskImg = mctx.createImageData(FW, FH);
+  }
+  const d = maskImg.data;
+  for (let k = 0, p = 0; k < FW * FH; k++, p += 4) {
+    const bridge = corridor[k] > 0.3 && mask[k] < 0.5;
+    d[p] = bridge ? 40 : 200; d[p + 1] = bridge ? 110 : 68; d[p + 2] = bridge ? 210 : 43;
+    d[p + 3] = (bridge ? 0.9 : maskB[k]) * 90;
+  }
+  mctx.putImageData(maskImg, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(maskCanvas, 0, 0, W, H);
+}
+
 function draw() {
   const { paper, ink } = colors();
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -908,6 +1049,7 @@ function draw() {
     drawVideoCover(ctx, W, H);
     ctx.globalAlpha = 1;
   }
+  if (ui.showMask && FW) drawMask();
   const n = pn, p = pts;
   if (n < 3) return;
   // quadratic curves through the midpoints keep the line smooth at any point density
@@ -968,7 +1110,8 @@ function frame(t) {
   if (t - statT > 500) {
     stepsPerSec = (stepCount - statSteps) * 1000 / (t - statT);
     statT = t; statSteps = stepCount;
-    stats.textContent = `${pn.toLocaleString()} pts · ${fps.toFixed(0)} fps · ${stepsPerSec.toFixed(0)} steps/s`;
+    stats.textContent = `${pn.toLocaleString()} pts · ${fps.toFixed(0)} fps · ${stepsPerSec.toFixed(0)} steps/s` +
+      (fit > 1.05 ? ` · spacing ×${fit.toFixed(1)}` : "");
   }
 }
 
